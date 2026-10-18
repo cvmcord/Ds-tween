@@ -1,0 +1,485 @@
+-- Item Collector UI + Tween System
+-- For a Roblox Studio project you control.
+-- Place in StarterPlayer > StarterPlayerScripts as a LocalScript.
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- SETTINGS
+
+local config = {
+    ToggleUI = Enum.KeyCode.M,
+    ToggleCollector = Enum.KeyCode.P,
+    TweenSpeed = 30,
+
+    Items = {
+        "Bread",
+        "Cheese",
+        "Meat",
+        "Metal",
+        "Battery",
+        "Wires",
+        "Pentacoin"
+    }
+}
+
+local running = false
+local uiVisible = true
+local waitingForKey = nil
+local selectedItem = nil
+
+local activeTweens = {}
+local collectorGeneration = 0
+
+-- GUI CREATION
+
+local old = playerGui:FindFirstChild("ItemCollectorUI")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "ItemCollectorUI"
+gui.ResetOnSpawn = false
+gui.Parent = playerGui
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(350, 475)
+main.Position = UDim2.new(0, 30, 0.5, -237)
+main.BackgroundColor3 = Color3.fromRGB(28, 30, 40)
+main.BorderSizePixel = 0
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+
+local function makeLabel(text, x, y, w, h)
+    local obj = Instance.new("TextLabel")
+    obj.Position = UDim2.fromOffset(x, y)
+    obj.Size = UDim2.fromOffset(w, h)
+    obj.BackgroundTransparency = 1
+    obj.Text = text
+    obj.TextColor3 = Color3.fromRGB(240, 240, 245)
+    obj.Font = Enum.Font.Gotham
+    obj.TextSize = 14
+    obj.TextXAlignment = Enum.TextXAlignment.Left
+    obj.Parent = main
+    return obj
+end
+
+local function makeButton(text, x, y, w, h)
+    local obj = Instance.new("TextButton")
+    obj.Position = UDim2.fromOffset(x, y)
+    obj.Size = UDim2.fromOffset(w, h)
+    obj.BackgroundColor3 = Color3.fromRGB(65, 90, 145)
+    obj.TextColor3 = Color3.new(1, 1, 1)
+    obj.Font = Enum.Font.GothamMedium
+    obj.TextSize = 13
+    obj.Text = text
+    obj.BorderSizePixel = 0
+    obj.Parent = main
+    Instance.new("UICorner", obj).CornerRadius = UDim.new(0, 6)
+    return obj
+end
+
+local function makeBox(placeholder, x, y, w, h)
+    local obj = Instance.new("TextBox")
+    obj.Position = UDim2.fromOffset(x, y)
+    obj.Size = UDim2.fromOffset(w, h)
+    obj.BackgroundColor3 = Color3.fromRGB(43, 46, 57)
+    obj.TextColor3 = Color3.new(1, 1, 1)
+    obj.PlaceholderColor3 = Color3.fromRGB(165, 165, 175)
+    obj.PlaceholderText = placeholder
+    obj.Font = Enum.Font.Gotham
+    obj.TextSize = 13
+    obj.ClearTextOnFocus = false
+    obj.Text = ""
+    obj.BorderSizePixel = 0
+    obj.Parent = main
+    Instance.new("UICorner", obj).CornerRadius = UDim.new(0, 6)
+    return obj
+end
+
+makeLabel("ITEM COLLECTOR", 15, 10, 320, 30).TextSize = 20
+
+local status = makeLabel("Status: STOPPED", 15, 42, 320, 20)
+status.TextColor3 = Color3.fromRGB(255, 130, 130)
+
+local startButton = makeButton("Start Tweening [P]", 15, 70, 320, 35)
+
+makeLabel("Tween Speed", 15, 115, 150, 20)
+
+local speedBox = makeBox("Speed", 15, 140, 200, 32)
+speedBox.Text = tostring(config.TweenSpeed)
+
+local applySpeed = makeButton("Apply", 225, 140, 110, 32)
+
+makeLabel("ADD ITEM", 15, 183, 320, 20)
+
+local itemBox = makeBox("Enter item name...", 15, 208, 220, 32)
+local addButton = makeButton("Add", 245, 208, 90, 32)
+
+makeLabel("ITEM LIST — SELECT TO REMOVE", 15, 250, 320, 20)
+
+local dropdownButton = makeButton("Select an item ▼", 15, 275, 320, 32)
+
+local listFrame = Instance.new("ScrollingFrame")
+listFrame.Position = UDim2.fromOffset(15, 313)
+listFrame.Size = UDim2.fromOffset(320, 85)
+listFrame.BackgroundColor3 = Color3.fromRGB(38, 40, 49)
+listFrame.BorderSizePixel = 0
+listFrame.ScrollBarThickness = 5
+listFrame.CanvasSize = UDim2.new()
+listFrame.Visible = false
+listFrame.Parent = main
+
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 3)
+layout.Parent = listFrame
+
+local removeButton = makeButton("Remove Selected", 15, 405, 155, 30)
+local closeButton = makeButton("Hide UI [M]", 180, 405, 155, 30)
+local uiKeyButton = makeButton("UI Key: M", 15, 440, 155, 25)
+local collectorKeyButton = makeButton("Collector Key: P", 180, 440, 155, 25)
+
+-- ITEM MATCHING
+
+local function isTargetItem(itemName)
+    for _, targetName in ipairs(config.Items) do
+        if itemName:lower() == targetName:lower() then
+            return true
+        end
+    end
+    return false
+end
+
+-- CHARACTER
+
+local function getRoot()
+    local character = player.Character
+    if not character then return nil end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+-- TWEEN MANAGEMENT
+
+local function cancelAllTweens()
+    for part, tween in pairs(activeTweens) do
+        activeTweens[part] = nil
+        pcall(function()
+            tween:Cancel()
+        end)
+    end
+end
+
+local function tweenItem(item, root)
+    if not running or not item or not item.Parent then return end
+    if not isTargetItem(item.Name) then return end
+    if not root or not root.Parent then return end
+
+    -- Pentacoin uses Coin; other items generally use Handle.
+    local targetPart
+
+    if item.Name:lower() == "pentacoin" then
+        targetPart = item:FindFirstChild("Coin", true)
+    end
+
+    targetPart = targetPart
+        or item:FindFirstChild("Handle", true)
+        or item:FindFirstChild("Coin", true)
+
+    if not targetPart and item:IsA("BasePart") then
+        targetPart = item
+    end
+
+    if not targetPart then
+        warn("[Collector] No Coin or Handle found in:", item:GetFullName())
+        return
+    end
+
+    if not targetPart:IsA("BasePart") then
+        warn("[Collector] Target is not a BasePart:", targetPart:GetFullName())
+        return
+    end
+
+    if activeTweens[targetPart] then return end
+
+    print("[Collector] Found target:", item:GetFullName(), "Part:", targetPart:GetFullName())
+
+    -- A client-side tween cannot move an anchored part reliably.
+    if targetPart.Anchored then
+        warn("[Collector] Target part is anchored; client tween may not move it:", targetPart:GetFullName())
+    end
+
+    local distance = (targetPart.Position - root.Position).Magnitude
+    local duration = math.max(distance / math.max(config.TweenSpeed, 0.1), 0.05)
+
+    local tween = TweenService:Create(
+        targetPart,
+        TweenInfo.new(duration, Enum.EasingStyle.Linear),
+        {CFrame = root.CFrame}
+    )
+
+    activeTweens[targetPart] = tween
+
+    tween.Completed:Connect(function()
+        if activeTweens[targetPart] == tween then
+            activeTweens[targetPart] = nil
+        end
+    end)
+
+    tween:Play()
+end
+
+-- FIND ITEM FOLDERS
+
+local function scanItems()
+    local root = getRoot()
+
+    if not root then
+        warn("[Collector] Character root not found")
+        return
+    end
+
+    local elevator = Workspace:FindFirstChild("Elevator")
+    local elevatorItems = elevator and elevator:FindFirstChild("Items")
+
+    if elevatorItems then
+        local pentacoin = elevatorItems:FindFirstChild("Pentacoin")
+
+        if pentacoin and isTargetItem(pentacoin.Name) then
+            tweenItem(pentacoin, root)
+        elseif not pentacoin then
+            -- Avoid repeatedly flooding Output when it hasn't spawned.
+            if not scanItems._warnedPentacoin then
+                warn("[Collector] Workspace.Elevator.Items.Pentacoin not found")
+                scanItems._warnedPentacoin = true
+            end
+        end
+    end
+
+    for _, descendant in ipairs(Workspace:GetDescendants()) do
+        if not running then return end
+
+        if descendant.Name == "Items" then
+            local parent = descendant.Parent
+
+            if parent and (parent.Name == "Objects" or parent.Name == "Elevator") then
+                for _, item in ipairs(descendant:GetChildren()) do
+                    if isTargetItem(item.Name) then
+                        tweenItem(item, root)
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- START / STOP
+
+local function updateStatus()
+    if running then
+        status.Text = "Status: RUNNING"
+        status.TextColor3 = Color3.fromRGB(120, 255, 150)
+        startButton.Text = "Stop Tweening [" .. config.ToggleCollector.Name .. "]"
+    else
+        status.Text = "Status: STOPPED"
+        status.TextColor3 = Color3.fromRGB(255, 130, 130)
+        startButton.Text = "Start Tweening [" .. config.ToggleCollector.Name .. "]"
+    end
+end
+
+local function toggleCollector()
+    running = not running
+    collectorGeneration += 1
+
+    local generation = collectorGeneration
+
+    if not running then
+        cancelAllTweens()
+        updateStatus()
+        return
+    end
+
+    updateStatus()
+
+    task.spawn(function()
+        while running and generation == collectorGeneration do
+            scanItems()
+            task.wait(0.25)
+        end
+    end)
+end
+
+startButton.Activated:Connect(toggleCollector)
+
+-- ITEM LIST
+
+local function refreshItems()
+    for _, child in ipairs(listFrame:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+
+    for _, name in ipairs(config.Items) do
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -5, 0, 25)
+        button.BackgroundColor3 = name == selectedItem
+            and Color3.fromRGB(85, 110, 170)
+            or Color3.fromRGB(52, 55, 67)
+        button.Text = name
+        button.TextColor3 = Color3.new(1, 1, 1)
+        button.Font = Enum.Font.Gotham
+        button.TextSize = 13
+        button.BorderSizePixel = 0
+        button.Parent = listFrame
+
+        button.Activated:Connect(function()
+            selectedItem = name
+            dropdownButton.Text = "Selected: " .. name
+            refreshItems()
+        end)
+    end
+
+    listFrame.CanvasSize = UDim2.fromOffset(0, #config.Items * 28)
+end
+
+addButton.Activated:Connect(function()
+    local name = itemBox.Text:match("^%s*(.-)%s*$")
+    if name == "" then return end
+
+    for _, existing in ipairs(config.Items) do
+        if existing:lower() == name:lower() then
+            itemBox.Text = ""
+            return
+        end
+    end
+
+    table.insert(config.Items, name)
+    itemBox.Text = ""
+    refreshItems()
+end)
+
+removeButton.Activated:Connect(function()
+    if not selectedItem then return end
+
+    for i, name in ipairs(config.Items) do
+        if name == selectedItem then
+            table.remove(config.Items, i)
+            break
+        end
+    end
+
+    selectedItem = nil
+    dropdownButton.Text = "Select an item ▼"
+    refreshItems()
+end)
+
+dropdownButton.Activated:Connect(function()
+    listFrame.Visible = not listFrame.Visible
+end)
+
+-- SPEED SETTING
+
+applySpeed.Activated:Connect(function()
+    local speed = tonumber(speedBox.Text)
+
+    if speed and speed > 0 and speed <= 500 then
+        config.TweenSpeed = speed
+        speedBox.Text = tostring(speed)
+    else
+        speedBox.Text = tostring(config.TweenSpeed)
+    end
+end)
+
+-- UI VISIBILITY AND KEYBINDS
+
+closeButton.Activated:Connect(function()
+    uiVisible = false
+    main.Visible = false
+end)
+
+uiKeyButton.Activated:Connect(function()
+    waitingForKey = "UI"
+    uiKeyButton.Text = "Press a key..."
+end)
+
+collectorKeyButton.Activated:Connect(function()
+    waitingForKey = "COLLECTOR"
+    collectorKeyButton.Text = "Press a key..."
+end)
+
+UIS.InputBegan:Connect(function(input, processed)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+    if waitingForKey then
+        local key = input.KeyCode
+
+        if key ~= Enum.KeyCode.Unknown then
+            if waitingForKey == "UI" then
+                config.ToggleUI = key
+                uiKeyButton.Text = "UI Key: " .. key.Name
+                closeButton.Text = "Hide UI [" .. key.Name .. "]"
+            else
+                config.ToggleCollector = key
+                collectorKeyButton.Text = "Collector Key: " .. key.Name
+                updateStatus()
+            end
+        end
+
+        waitingForKey = nil
+        return
+    end
+
+    if processed then return end
+
+    if input.KeyCode == config.ToggleUI then
+        uiVisible = not uiVisible
+        main.Visible = uiVisible
+    elseif input.KeyCode == config.ToggleCollector then
+        toggleCollector()
+    end
+end)
+
+-- DRAGGABLE WINDOW
+
+local dragging = false
+local dragStart
+local originalPosition
+
+main.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        originalPosition = main.Position
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+
+        main.Position = UDim2.new(
+            originalPosition.X.Scale,
+            originalPosition.X.Offset + delta.X,
+            originalPosition.Y.Scale,
+            originalPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end)
+
+-- INITIALIZE
+
+refreshItems()
+updateStatus()
+
+print("[Collector] UI loaded. Press P to start.")
